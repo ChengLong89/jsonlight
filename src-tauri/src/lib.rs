@@ -5,15 +5,13 @@ use std::path::PathBuf;
 struct OpenWithFile {
   path: String,
   mode: &'static str,
-  content: Option<String>,
-  error: Option<String>,
 }
 
 /// Files the app was launched with. The frontend pulls these once it has loaded;
 /// emitting an event from `setup` would fire before the page registers a listener.
 struct LaunchFiles(Vec<OpenWithFile>);
 
-fn load_launch_file(path: PathBuf) -> OpenWithFile {
+fn launch_file(path: PathBuf) -> OpenWithFile {
   // Explorer passes absolute paths; make CLI-relative paths absolute too
   let path = if path.is_absolute() {
     path
@@ -27,16 +25,9 @@ fn load_launch_file(path: PathBuf) -> OpenWithFile {
     _ => "json", // .json, .geojson and anything else
   };
 
-  let (content, error) = match std::fs::read_to_string(&path) {
-    Ok(content) => (Some(content), None),
-    Err(err) => (None, Some(err.to_string())),
-  };
-
   OpenWithFile {
     path: path.to_string_lossy().into_owned(),
     mode,
-    content,
-    error,
   }
 }
 
@@ -45,17 +36,30 @@ fn get_open_with_files(files: tauri::State<LaunchFiles>) -> Vec<OpenWithFile> {
   files.0.clone()
 }
 
+/// Returns the raw bytes of launch file `index`. A binary response skips the
+/// JSON encoding of regular command results, which is slow for large files.
+/// Only files the app was launched with can be read.
+#[tauri::command]
+fn read_open_with_file(
+  index: usize,
+  files: tauri::State<LaunchFiles>,
+) -> Result<tauri::ipc::Response, String> {
+  let file = files.0.get(index).ok_or("no such launch file")?;
+  let bytes = std::fs::read(&file.path).map_err(|err| err.to_string())?;
+  Ok(tauri::ipc::Response::new(bytes))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
   let launch_files: Vec<OpenWithFile> = std::env::args_os()
     .skip(1)
     .map(PathBuf::from)
-    .map(load_launch_file)
+    .map(launch_file)
     .collect();
 
   tauri::Builder::default()
     .manage(LaunchFiles(launch_files))
-    .invoke_handler(tauri::generate_handler![get_open_with_files])
+    .invoke_handler(tauri::generate_handler![get_open_with_files, read_open_with_file])
     .setup(|app| {
       if cfg!(debug_assertions) {
         app.handle().plugin(
