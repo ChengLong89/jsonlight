@@ -42,3 +42,19 @@ main {
 .embedded-json-expanded > .kv > .kv-text .json-value {
     display: none;
 }
+
+/* Wrap long values to the view width instead of scrolling horizontally.
+   Flex items default to min-width: auto, which lets long content widen them. */
+.kv-text,
+.child-list {
+    min-width: 0;
+}
+
+.kv-text {
+    overflow-wrap: anywhere; /* also break strings without spaces, e.g. URLs */
+}
+
+.raw-string {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
