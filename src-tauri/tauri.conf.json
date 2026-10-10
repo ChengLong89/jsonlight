@@ -7,6 +7,7 @@
     "frontendDist": "../docs"
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [
       {
         "title": "JSON Light",
