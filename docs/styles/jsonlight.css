@@ -31,3 +31,14 @@ main {
     align-self: flex-start;
     flex-shrink: 0;
 }
+
+/* String holding embedded JSON has both buttons; move R left of the + button
+   (unless + is hidden, as on the root) */
+.collapse-button:not([style*="display: none"]) + .view-raw-button {
+    right: 4.25rem;
+}
+
+/* Expanded embedded JSON replaces the original string */
+.embedded-json-expanded > .kv > .kv-text .json-value {
+    display: none;
+}

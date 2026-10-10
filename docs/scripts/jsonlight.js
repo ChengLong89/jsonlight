@@ -25,7 +25,8 @@ let welcome = {
     "title": "JSON Light",
     "description": "A JSON viewer that displays multi-line strings in its raw format!",
     "tip": "Click the R (view raw) button in the following line",
-    "banner": "\n       _  _____  ____  _   _   _      _       _     _   \n      | |/ ____|/ __ \\| \\ | | | |    (_)     | |   | |  \n      | | (___ | |  | |  \\| | | |     _  __ _| |__ | |_ \n  _   | |\\___ \\| |  | | . ` | | |    | |/ _` | '_ \\| __|\n | |__| |____) | |__| | |\\  | | |____| | (_| | | | | |_ \n  \\____/|_____/ \\____/|_| \\_| |______|_|\\__, |_| |_|\\__|\n                                         __/ |          \n                                        |___/           \n"
+    "banner": "\n       _  _____  ____  _   _   _      _       _     _   \n      | |/ ____|/ __ \\| \\ | | | |    (_)     | |   | |  \n      | | (___ | |  | |  \\| | | |     _  __ _| |__ | |_ \n  _   | |\\___ \\| |  | | . ` | | |    | |/ _` | '_ \\| __|\n | |__| |____) | |__| | |\\  | | |____| | (_| | | | | |_ \n  \\____/|_____/ \\____/|_| \\_| |______|_|\\__, |_| |_|\\__|\n                                         __/ |          \n                                        |___/           \n",
+    "embedded-json": "{\"tip\": \"Strings containing JSON can be expanded with the + button\", \"nested\": [1, 2, 3]}"
 }
 
 /*************************************
@@ -96,8 +97,9 @@ function newToggleButton(text) {
 
 // Adds a collapse button and a collapsed child list to kvRoot.
 // The child list is initially empty,
-// When the button is hit, the child list is rendered from dataRef
-function addCollapse(kvRoot, dataRef) {
+// When the button is hit, the child list is rendered from childLoader
+// (defaults to kvRoot.loader).
+function addCollapse(kvRoot, dataRef, childLoader = kvRoot.loader) {
     kvRoot.dataRef = dataRef
 
     let kv = kvRoot.querySelector(".kv");
@@ -127,7 +129,7 @@ function addCollapse(kvRoot, dataRef) {
 
     collapseWrapper.addEventListener('show.bs.collapse', (ev) => {
         ev.stopPropagation();
-        for (const childKV of kvRoot.loader.getChild()) {
+        for (const childKV of childLoader.getChild()) {
             childList.appendChild(
                 renderKV(...childKV)
             )
@@ -189,10 +191,10 @@ function renderRawString(kvRoot) {
 }
 
 function cancelRawString(kvRoot) {
-    let rawString = kvRoot.querySelector(".raw-string");
+    let rawString = kvRoot.querySelector(":scope > .raw-string");
     kvRoot.removeChild(rawString);
     let jsonValue = kvRoot.querySelector(".kv .kv-text .json-value");
-    jsonValue.style.display = "initial";
+    jsonValue.style.display = ""; // let stylesheet rules (e.g. embedded-json-expanded) apply
 }
 
 function renderStringify(jobj) {
@@ -204,7 +206,53 @@ function renderStringify(jobj) {
 
 function renderString(kvRoot, jobj) {
     addViewRaw(kvRoot);
-    return renderStringify(jobj);
+    let valueSpan = renderStringify(jobj);
+
+    // A string holding a non-empty JSON object/array can be expanded like one
+    let embedded = parseEmbeddedJson(jobj);
+    if (embedded !== undefined) {
+        let childLoader = new WebDataLoader();
+        childLoader.loadObject(embedded);
+        addCollapse(kvRoot, embedded, childLoader);
+
+        // Hide the original string while expanded
+        let collapseWrapper = kvRoot.querySelector(":scope > .collapse");
+        collapseWrapper.addEventListener("show.bs.collapse", (ev) => {
+            if (ev.target == collapseWrapper) kvRoot.classList.add("embedded-json-expanded");
+        });
+        collapseWrapper.addEventListener("hide.bs.collapse", (ev) => {
+            if (ev.target == collapseWrapper) kvRoot.classList.remove("embedded-json-expanded");
+        });
+
+        let badge = document.createElement("span");
+        badge.classList.add("badge", "text-bg-secondary", "ms-2", "embedded-json-badge");
+        badge.textContent = "JSON";
+        let wrapper = document.createElement("span");
+        wrapper.append(valueSpan, badge);
+        return wrapper;
+    }
+    return valueSpan;
+}
+
+// Returns the parsed value if str is a non-empty JSON object or array,
+// otherwise undefined.
+function parseEmbeddedJson(str) {
+    let s = str.trim();
+    let first = s[0], last = s[s.length - 1];
+    if (!((first == "{" && last == "}") || (first == "[" && last == "]"))) {
+        return undefined;
+    }
+    let value;
+    try {
+        value = JSON.parse(s);
+    } catch (exception) {
+        return undefined;
+    }
+    if (value == null || typeof value != "object") return undefined;
+    if (Array.isArray(value) ? value.length == 0 : Object.keys(value).length == 0) {
+        return undefined;
+    }
+    return value;
 }
 
 function renderNumber(kvRoot, jobj) {
