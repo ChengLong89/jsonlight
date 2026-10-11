@@ -46,11 +46,11 @@ function renderKV(key, loader) {
     colonSpan.innerText = ": ";
     kvText.appendChild(colonSpan);
 
-    value = loader.getValue();
+    let value = loader.getValue();
     let valueSpan = null;
-    switch (typeof value) {
+    switch (loader.getKind()) {
         case "string":
-            valueSpan = renderString(kvRoot, value);
+            valueSpan = renderString(kvRoot, value, loader.truncatedBytes);
             break;
         case "number":
             valueSpan = renderNumber(kvRoot, value);
@@ -58,19 +58,25 @@ function renderKV(key, loader) {
         case "boolean":
             valueSpan = renderBool(kvRoot, value);
             break;
+        case "null":
+            valueSpan = renderNull(kvRoot, value);
+            break;
+        case "array":
+            valueSpan = renderArray(kvRoot, loader.isEmpty());
+            break;
         case "object":
-            if (value == null) {
-                valueSpan = renderNull(kvRoot, value);
-            }
-            else if (Array.isArray(value)) {
-                valueSpan = renderArray(kvRoot, value);
-            }
-            else {
-                valueSpan = renderObject(kvRoot, value);
-            }
+            valueSpan = renderObject(kvRoot, loader.isEmpty());
+            break;
     }
     kvText.appendChild(valueSpan);
     return kvRoot;
+}
+
+// "object", "array", "string", "number", "boolean" or "null"
+function jsonKind(value) {
+    if (value === null) return "null";
+    if (Array.isArray(value)) return "array";
+    return typeof value;
 }
 
 function newKV(loader) {
@@ -99,9 +105,7 @@ function newToggleButton(text) {
 // The child list is initially empty,
 // When the button is hit, the child list is rendered from childLoader
 // (defaults to kvRoot.loader).
-function addCollapse(kvRoot, dataRef, childLoader = kvRoot.loader) {
-    kvRoot.dataRef = dataRef
-
+function addCollapse(kvRoot, childLoader = kvRoot.loader) {
     let kv = kvRoot.querySelector(".kv");
     
     let collapseButton = newToggleButton("+");
@@ -109,7 +113,8 @@ function addCollapse(kvRoot, dataRef, childLoader = kvRoot.loader) {
     kv.insertBefore(collapseButton, kv.firstChild);
     
     let collapseWrapper = document.createElement("div");
-    collapseWrapper.classList.add("collapse");
+    // "collapse" becomes "collapsing" during animations; "collapse-wrapper" stays
+    collapseWrapper.classList.add("collapse", "collapse-wrapper");
     let childBlock = document.createElement("div");
     childBlock.classList.add("child-block", "d-flex", "gap-2");
     let indent = document.createElement("div");
@@ -134,7 +139,8 @@ function addCollapse(kvRoot, dataRef, childLoader = kvRoot.loader) {
         if (error) {
             childList.appendChild(renderNotice(error));
         } else {
-            appendChildPage(childList, childLoader, 0, CHILD_PAGE_SIZE);
+            // A promise for async loaders; Expand All waits for it
+            childList.pending = appendChildPage(childList, childLoader, 0, CHILD_PAGE_SIZE);
         }
         collapseButton.innerHTML = "-";
     });
@@ -152,18 +158,45 @@ const CHILD_PAGE_SIZE = 100;
 const SHOW_ALL_CHUNK_SIZE = 500; // rendered per animation frame by "Show all"
 
 // Renders children [start, start + count) of loader into childList, followed
-// by a "show more" row if children remain.
+// by a "show more" row if children remain. For async loaders, returns a
+// promise that settles once the page is rendered.
 function appendChildPage(childList, loader, start, count) {
+    if (loader.isAsync) return appendChildPageAsync(childList, loader, start, count);
+
     let total = loader.getChildCount();
     let end = Math.min(start + count, total);
-    let fragment = document.createDocumentFragment();
-    for (const childKV of loader.getChildRange(start, end)) {
-        fragment.appendChild(renderKV(...childKV));
-    }
-    childList.appendChild(fragment);
+    appendEntries(childList, loader.getChildRange(start, end));
     if (end < total) {
         childList.appendChild(renderMoreRow(childList, loader, end, total));
     }
+}
+
+async function appendChildPageAsync(childList, loader, start, count) {
+    let generation = childList.renderGeneration;
+    let loading = renderNotice("Loading…");
+    childList.appendChild(loading);
+    let page;
+    try {
+        page = await loader.fetchPage(start, start + count);
+    } catch (error) {
+        loading.textContent = `Failed to load: ${error.message ?? error}`;
+        return;
+    }
+    if (childList.renderGeneration !== generation || !childList.isConnected) return;
+    loading.remove();
+    appendEntries(childList, page.entries);
+    let end = start + page.entries.length;
+    if (end < page.total) {
+        childList.appendChild(renderMoreRow(childList, loader, end, page.total));
+    }
+}
+
+function appendEntries(childList, entries) {
+    let fragment = document.createDocumentFragment();
+    for (const childKV of entries) {
+        fragment.appendChild(renderKV(...childKV));
+    }
+    childList.appendChild(fragment);
 }
 
 function renderMoreRow(childList, loader, next, total) {
@@ -210,11 +243,19 @@ async function appendAllChildren(childList, loader, start, total) {
         if (childList.renderGeneration !== generation || !childList.isConnected) return;
         progress.remove();
         let end = Math.min(i + SHOW_ALL_CHUNK_SIZE, total);
-        let fragment = document.createDocumentFragment();
-        for (const childKV of loader.getChildRange(i, end)) {
-            fragment.appendChild(renderKV(...childKV));
+        let entries;
+        if (loader.isAsync) {
+            try {
+                entries = (await loader.fetchPage(i, end)).entries;
+            } catch (error) {
+                childList.appendChild(renderNotice(`Failed to load: ${error.message ?? error}`));
+                return;
+            }
+            if (childList.renderGeneration !== generation || !childList.isConnected) return;
+        } else {
+            entries = loader.getChildRange(i, end);
         }
-        childList.appendChild(fragment);
+        appendEntries(childList, entries);
         if (end < total) {
             progress.textContent = `Rendering… ${end.toLocaleString()} of ${total.toLocaleString()}`;
             childList.appendChild(progress);
@@ -291,17 +332,27 @@ function renderStringify(jobj) {
     return valueSpan;
 }
 
-function renderString(kvRoot, jobj) {
+// truncatedBytes: set when jobj is only a preview of a longer string
+function renderString(kvRoot, jobj, truncatedBytes) {
     addViewRaw(kvRoot);
     let valueSpan = renderStringify(jobj);
+
+    if (truncatedBytes) {
+        let note = document.createElement("span");
+        note.classList.add("small", "text-muted", "ms-2");
+        note.textContent = `(showing the start of a ${formatBytes(truncatedBytes)} string)`;
+        let wrapper = document.createElement("span");
+        wrapper.append(valueSpan, note);
+        return wrapper;
+    }
 
     // A string holding a non-empty JSON object/array can be expanded like one
     let childLoader = embeddedJsonLoader(jobj);
     if (childLoader) {
-        addCollapse(kvRoot, null, childLoader);
+        addCollapse(kvRoot, childLoader);
 
         // Hide the original string while expanded
-        let collapseWrapper = kvRoot.querySelector(":scope > .collapse");
+        let collapseWrapper = kvRoot.querySelector(":scope > .collapse-wrapper");
         collapseWrapper.addEventListener("show.bs.collapse", (ev) => {
             if (ev.target == collapseWrapper) kvRoot.classList.add("embedded-json-expanded");
         });
@@ -375,26 +426,26 @@ function renderNull(kvRoot, jobj) {
     return renderStringify(jobj);
 }
 
-function renderArray(kvRoot, jobj) {
+function renderArray(kvRoot, isEmpty) {
     let valueSpan = document.createElement("span");
     valueSpan.classList.add("json-value");
-    if (jobj.length == 0) {
+    if (isEmpty) {
         valueSpan.textContent = "[]";
         return valueSpan;
     }
-    addCollapse(kvRoot, jobj);
+    addCollapse(kvRoot);
     valueSpan.textContent = "[...]";
     return valueSpan;
 }
 
-function renderObject(kvRoot, jobj) {
+function renderObject(kvRoot, isEmpty) {
     let valueSpan = document.createElement("span");
     valueSpan.classList.add("json-value");
-    if (Object.keys(jobj).length == 0) {
+    if (isEmpty) {
         valueSpan.textContent = "{}"
         return valueSpan;
     }
-    addCollapse(kvRoot, jobj);
+    addCollapse(kvRoot);
     valueSpan.textContent = "{...}"
     return valueSpan;
 }
@@ -418,6 +469,12 @@ class DataLoader {
     }
     getValue() {
         return this.value;
+    }
+    getKind() {
+        return jsonKind(this.value);
+    }
+    isEmpty() {
+        return this.getChildCount() == 0;
     }
 
     getChildCount() {
@@ -568,6 +625,40 @@ class EmbeddedJsonLoader extends WebDataLoader {
         }
         this.source = null;
         return this.error;
+    }
+}
+
+// Desktop app: a node of a JSON file too large to load in the page. The Rust
+// backend (src-tauri/src/large_json.rs) keeps the file memory-mapped and
+// returns children a page at a time, so children are loaded asynchronously.
+class LargeJsonLoader extends DataLoader {
+    // node: { kind, start, empty, raw, truncated_bytes } from the backend
+    constructor(doc, node) {
+        super();
+        this.isAsync = true;
+        this.doc = doc;
+        this.node = node;
+        this.truncatedBytes = node.truncated_bytes;
+        this.value = node.raw == null ? undefined : JSON.parse(node.raw);
+    }
+
+    getKind() {
+        return this.node.kind;
+    }
+    isEmpty() {
+        return this.node.empty;
+    }
+
+    // Resolves to { total, entries: [(key, loader)] } for children [from, to)
+    async fetchPage(from, to) {
+        const page = await window.__TAURI__.core.invoke('large_json_children', {
+            doc: this.doc, start: this.node.start, from, to
+        });
+        return {
+            total: page.total,
+            entries: page.children.map((child, i) =>
+                [child.key ?? from + i, new LargeJsonLoader(this.doc, child.node)])
+        };
     }
 }
 
@@ -786,9 +877,13 @@ function showLoading(text) {
     document.querySelector("#view").replaceChildren(renderNotice(text));
 }
 
-// Lets the browser paint (e.g. a loading message) before blocking work
+// Lets the browser paint (e.g. a loading message) before blocking work.
+// Hidden pages get no animation frames, so a timer resolves it as well.
 function nextFrame() {
-    return new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve)));
+    return new Promise(resolve => {
+        requestAnimationFrame(() => setTimeout(resolve));
+        setTimeout(resolve, 100);
+    });
 }
 
 async function renderJsonFile(file) {
@@ -987,49 +1082,67 @@ collapseAllButton.addEventListener("click", (ev) => {
 const EXPAND_ALL_LIMIT = 2000;
 
 async function expandAll() {
-    let foundCollapsed = true;
-    let renderedItems = document.querySelector("#view").getElementsByClassName("kv-root");
+    let view = document.querySelector("#view");
+    // Without the 350 ms animation per level, each round only waits for data
+    view.classList.add("no-transition");
+    try {
+        await expandAllLevels(view);
+    } finally {
+        view.classList.remove("no-transition");
+    }
+}
+
+async function expandAllLevels(view) {
+    let renderedItems = view.getElementsByClassName("kv-root");
     let limitReached = false;
     setExpandStatus("");
 
-    // Keep expanding until no more collapsed items are found
-    while (foundCollapsed && !limitReached) {
-        foundCollapsed = false;
+    // Keep expanding level by level until a round expands nothing: either
+    // everything is open or the limit is reached
+    while (true) {
         const collapseButtons = document.querySelectorAll(".collapse-button");
 
         // Create an array of promises for all the expansions in this level
         const expansionPromises = [];
+        // Children of async loaders arrive later; count each as a full page
+        // until they do. A node skipped on this estimate is retried next
+        // round, once the real counts are known.
+        let loadingItems = 0;
+        limitReached = false;
 
         collapseButtons.forEach(button => {
             const kvRoot = button.closest(".kv-root");
-            const collapseWrapper = kvRoot.querySelector(".collapse");
+            const collapseWrapper = kvRoot.querySelector(":scope > .collapse-wrapper");
 
-            // Only expand if it's currently collapsed
-            if (!collapseWrapper.classList.contains("show") && !limitReached) {
-                if (renderedItems.length >= EXPAND_ALL_LIMIT) {
+            // Only expand if it's currently collapsed (and not animating)
+            if (!collapseWrapper.classList.contains("show") && !collapseWrapper.classList.contains("collapsing")) {
+                if (renderedItems.length + loadingItems >= EXPAND_ALL_LIMIT) {
                     limitReached = true;
                     return;
                 }
-                foundCollapsed = true;
-                
+
                 // Create a promise that resolves when the collapse is fully shown
                 const expansionPromise = new Promise((resolve) => {
-                    const onShown = () => {
+                    const onShown = async () => {
                         collapseWrapper.removeEventListener('shown.bs.collapse', onShown);
+                        // Children of async loaders may still be loading
+                        await collapseWrapper.querySelector(".child-list").pending;
                         resolve();
                     };
                     collapseWrapper.addEventListener('shown.bs.collapse', onShown);
                     button.click();
                 });
-                
+                if (collapseWrapper.querySelector(".child-list").pending) {
+                    loadingItems += CHILD_PAGE_SIZE;
+                }
+
                 expansionPromises.push(expansionPromise);
             }
         });
         
+        if (expansionPromises.length == 0) break;
         // Wait for all expansions in this level to complete before moving to the next level
-        if (expansionPromises.length > 0) {
-            await Promise.all(expansionPromises);
-        }
+        await Promise.all(expansionPromises);
     }
 
     if (limitReached) {
@@ -1047,8 +1160,8 @@ function collapseAll() {
     const collapseButtons = document.querySelectorAll(".collapse-button");
     collapseButtons.forEach(button => {
         const kvRoot = button.closest(".kv-root");
-        const collapseWrapper = kvRoot.querySelector(".collapse");
-        
+        const collapseWrapper = kvRoot.querySelector(":scope > .collapse-wrapper");
+
         // Skip the root level collapse button (it should stay expanded)
         // The root level button has display: none style applied
         const isRootLevel = button.style.display === "none";
@@ -1060,21 +1173,31 @@ function collapseAll() {
     });
 }
 
-// Handle "open with" functionality from Tauri
-// openWithFile: { path, mode } of launch file `index`; its bytes are read by
-// the Rust backend and handed over as a File, so the same loaders as the file
-// pickers are used (including the JSONL line index).
-async function handleOpenWithFile(openWithFile, index) {
-    const { path: filePath, mode } = openWithFile;
+// Desktop app: JSON files above this size are opened by the Rust backend
+// (LargeJsonLoader) instead of being loaded into the page.
+const LARGE_JSON_SIZE = 256 * 1024 * 1024;
+
+// Desktop app: opens a file the user opened via "Open with" or the native
+// file dialog. opened: { index, path, mode, size } from the backend. Except
+// for large JSON, its bytes are handed over as a File, so the same loaders
+// as the file pickers are used (including the JSONL line index).
+async function openDesktopFile(opened, mode = opened.mode) {
+    const { index, path: filePath, size } = opened;
     try {
         console.log(`Opening file: ${filePath} in ${mode} mode`);
 
         // Show the full absolute path
         updateFileNameDisplay(filePath);
-        showLoading(`Reading ${filePath}…`);
+        const fileName = filePath.split(/[\\/]/).pop();
 
+        if (mode !== 'jsonl' && size > LARGE_JSON_SIZE) {
+            hideJsonlControls();
+            await renderLargeJson(index, fileName, size);
+            return;
+        }
+
+        showLoading(`Reading ${fileName} (${formatBytes(size)})…`);
         const bytes = await window.__TAURI__.core.invoke('read_open_with_file', { index });
-        const fileName = filePath.split(/[\/]/).pop();
         const file = new File([bytes], fileName, { type: 'text/plain' });
 
         if (mode === 'jsonl') {
@@ -1101,6 +1224,38 @@ async function handleOpenWithFile(openWithFile, index) {
         displayParseError({
             type: 'File Open Error',
             error: `Failed to open file: ${error.message ?? error}`
+        });
+    }
+}
+
+async function renderLargeJson(index, fileName, size) {
+    let token = ++g_renderToken;
+    showLoading(`Checking ${fileName} (${formatBytes(size)})… this can take a few seconds for large files`);
+    let opened;
+    try {
+        opened = await window.__TAURI__.core.invoke('large_json_open', { index });
+    } catch (error) {
+        if (token !== g_renderToken) return;
+        document.querySelector("#view").replaceChildren();
+        displayParseError({ type: 'JSON Parse Error', error: `${error.message ?? error}` });
+        return;
+    }
+    if (token !== g_renderToken) return;
+    document.querySelector("#view").replaceChildren();
+    renderJSON(new LargeJsonLoader(opened.doc, opened.root));
+}
+
+// Desktop app: the file inputs cannot reveal a file's path, which large
+// files need, so they open the native file dialog instead.
+if (window.__TAURI__) {
+    for (const [picker, mode] of [[filePicker, 'json'], [jsonlPicker, 'jsonl']]) {
+        picker.addEventListener("click", async (ev) => {
+            ev.preventDefault();
+            const opened = await window.__TAURI__.core.invoke('pick_file');
+            if (opened) {
+                if (mode == 'json') hideJsonlControls();
+                await openDesktopFile(opened, mode);
+            }
         });
     }
 }

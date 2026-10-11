@@ -100,7 +100,7 @@
       if (window.__TAURI__) {
         window.__TAURI__.core.invoke('get_open_with_files').then(files => {
           if (files && files.length > 0) {
-            handleOpenWithFile(files[0], 0); // Handle first file for now
+            openDesktopFile(files[0]); // Handle first file for now
           }
         }).catch(err => {
           console.error('Failed to get "Open with" files:', err);
