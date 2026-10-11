@@ -58,3 +58,8 @@ main {
     white-space: pre-wrap;
     overflow-wrap: anywhere;
 }
+
+/* Expand All opens many levels; skip the animation so it is not waited on */
+#view.no-transition .collapsing {
+    transition: none;
+}
